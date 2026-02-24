@@ -1,13 +1,10 @@
 import os
 from typing import List, Dict
 from langchain_community.document_loaders import TextLoader, PyPDFLoader, Docx2txtLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_openai import ChatOpenAI
-from langchain.chains import create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
-from langchain_core.prompts import ChatPromptTemplate
 from config import Config
 
 class RAGEngine:
@@ -20,7 +17,6 @@ class RAGEngine:
         )
         self.vectorstore = None
         self.retriever = None
-        self.chain = None
         
     def load_documents(self):
         """Load documents from data directory"""
@@ -54,8 +50,7 @@ class RAGEngine:
         # Split documents
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=Config.CHUNK_SIZE,
-            chunk_overlap=Config.CHUNK_OVERLAP,
-            separators=["\n\n", "\n", " ", ""]
+            chunk_overlap=Config.CHUNK_OVERLAP
         )
         chunks = text_splitter.split_documents(documents)
         print(f"Created {len(chunks)} chunks")
@@ -72,56 +67,52 @@ class RAGEngine:
         self.retriever = self.vectorstore.as_retriever(
             search_kwargs={"k": Config.TOP_K_RESULTS}
         )
-        
-        # Create the chain using the new method
-        self._create_chain()
-        print("RAG chain created successfully")
-    
-    def _create_chain(self):
-        """Create the retrieval chain using the new LangChain approach"""
-        # Define the prompt template
-        system_prompt = (
-            "You are a helpful assistant for application packaging questions. "
-            "Use the following context to answer the question. "
-            "If you don't know the answer, say you don't know. "
-            "Keep the answer concise and focused on silent installation parameters.\n\n"
-            "Context: {context}"
-        )
-        
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}")
-        ])
-        
-        # Create the document combining chain
-        combine_docs_chain = create_stuff_documents_chain(self.llm, prompt)
-        
-        # Create the retrieval chain
-        self.chain = create_retrieval_chain(self.retriever, combine_docs_chain)
+        print("Vectorstore and retriever created successfully")
     
     def search_documents(self, query: str) -> Dict:
         """Search documents using RAG"""
-        if not self.chain:
+        if not self.retriever:
             self.load_documents()
-            if not self.chain:
+            if not self.retriever:
                 return {
                     "answer": "No documents loaded. Please add files to the data folder.",
                     "sources": []
                 }
         
-        # Invoke the chain
-        result = self.chain.invoke({"input": query})
+        # Get relevant documents
+        docs = self.retriever.get_relevant_documents(query)
         
-        # Extract sources from the result
-        sources = []
-        if 'context' in result:
-            for doc in result['context']:
-                sources.append({
-                    "content": doc.page_content[:200] + "...",
-                    "metadata": doc.metadata
-                })
+        if not docs:
+            return {
+                "answer": "No relevant documents found for your query.",
+                "sources": []
+            }
+        
+        # Prepare context from documents
+        context = "\n\n".join([doc.page_content for doc in docs])
+        
+        # Create prompt
+        prompt = f"""You are a helpful assistant for application packaging questions.
+Use the following context to answer the question about silent installation parameters.
+If you don't know the answer, say you don't know.
+
+Context:
+{context}
+
+Question: {query}
+
+Answer: """
+        
+        # Get response from LLM
+        response = self.llm.predict(prompt)
         
         return {
-            "answer": result['answer'],
-            "sources": sources
+            "answer": response,
+            "sources": [
+                {
+                    "content": doc.page_content[:200] + "...",
+                    "metadata": doc.metadata
+                }
+                for doc in docs
+            ]
         }
